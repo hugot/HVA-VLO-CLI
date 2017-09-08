@@ -4,13 +4,13 @@ dotDir="$HOME/.VLO"
 sessionTime="$dotDir/sessionTime"
 url="https://vlo.informatica.hva.nl"
 cookie="$dotDir/cham.cookie"
-username="default"
-
+username="default" 
+defaultCompletrionString='exit ls searchcourse'
 [[ -d $dotDir ]] || mkdir $dotDir
 
 notLoggedIn(){
   if [[ -f $sessionTime ]]; then
-    if [[ $(cat $sessionTime) -lt $(($(date +'%s') - 360000)) ]]; then
+    if [[ $(cat $sessionTime) -lt $(($(date +'%s') - 3600)) ]]; then
       return 0
     else return 1
     fi
@@ -72,28 +72,140 @@ else
   date +'%s' > $sessionTime
 fi
 
-case $1 in
-  courses)
-    echo $'\t ==== COURSES ===='
-    curl -s -X GET --cookie $cookie $url/user_portal.php | \
-      grep -i 'class="row"' -A 3 | grep -io --perl-regexp '(?<=alt=")[^"]*' |\
-      while read line; do ((lineno++)); [[ $lineno -gt 1 ]] && echo "$line"; done
-    ;;
-  searchcourse)
-    shift
-    echo $'\t==== SEARCH RESULTS ===='
-    sec_token="$(curl -s -X GET --cookie $cookie "$url/main/auth/courses.php" |\
-      grep -o --perl-regex '(?<=name="sec_token" value=")[^"]*')"
-    query="$(queryString -f action -v subscribe \
-      -f category_code -v ALL \
-      -f hidden_links -v "" \
-      -f pageCurrent -v 1 \
-      -f pageLength -v 12 \
-      -f search_term -v "" \
-      -f search_course -v 1 \
-      -f sec_token -v "$sec_token" )"
-    curl -s -X POST --cookie $cookie "$url/main/auth/courses.php" \
-      -F "sec_token=$sec_token" -F 'search_course=1' -F "search_term=$1" |\
-      grep --perl-regex -io '(?<=<h4 class="title">)[^<]*'
-esac
+
+execute(){
+  case $1 in
+    ls)
+      lineno=0
+      courseList=()
+      locList=()
+      declare -A locList
+      echo $'\t ==== COURSES ===='
+      shopt -s lastpipe
+      curl -s -X GET --cookie $cookie $url/user_portal.php | \
+        grep -i 'class="row"' -A 3 | grep -io --perl-regexp '(?<=/courses/)[^/]+|(?<=alt=")[^"]*' |\
+        while read line; do 
+          ((lineno++))
+          if [[ $lineno -gt 1 ]] ; then
+            if [[ $(($lineno%2)) -eq 1 ]]; then 
+              line="${line// /-}"
+              courseList[${#courseList[@]}]="$line"
+              echo "$line"
+            else
+              locList[${#locList[@]}]="$line"
+            fi
+          fi
+        done
+        ;;
+      searchcourse)
+        shift
+        echo $'\t==== SEARCH RESULTS ===='
+        sec_token="$(curl -s -X GET --cookie $cookie "$url/main/auth/courses.php" |\
+          grep -o --perl-regex '(?<=name="sec_token" value=")[^"]*')"
+        query="$(queryString -f action -v subscribe \
+          -f category_code -v ALL \
+          -f hidden_links -v "" \
+          -f pageCurrent -v 1 \
+          -f pageLength -v 12 \
+          -f search_term -v "" \
+          -f search_course -v 1 \
+          -f sec_token -v "$sec_token" )"
+        curl -s -X POST --cookie $cookie "$url/main/auth/courses.php" \
+          -F "sec_token=$sec_token" -F 'search_course=1' -F "search_term=$1" |\
+          grep --perl-regex -io '(?<=<h4 class="title">)[^<]*'
+        ;;
+      cd)
+        shift
+        case "$location/${1/$location/}" in
+          '~'/*/*/*)
+            echo 'course/group|global/directory'
+            ;;
+          '~'/*/*)
+            echo course/group or course/global
+            ;;
+          '~'/*)
+            echo course
+            ;;
+          *)
+            echo "$location/${1/$location/}"
+        esac
+        ;;
+      exit)
+        break
+        ;;
+    esac
+}
+
+tabComplete(){
+  lastSpace=0
+  for i in `seq 1 ${#READLINE_LINE}`; do
+    [[ ${READLINE_LINE:$i:1} == ' ' && $lastSpace -eq 0 ]] && firstSpace=$i
+    [[ ${READLINE_LINE:$i:1} == ' ' ]] && lastSpace=$i
+  done
+  case ${READLINE_LINE:0:$(($firstSpace))} in
+    cd)
+      completionString="${courseList[*]}"
+      ;;
+    *)
+      completionString="$defaultCompletrionString"
+  esac
+  if [[ $lastSpace -eq 0 ]]; then
+    word="$READLINE_LINE"
+  else 
+    word="${READLINE_LINE:$(($lastSpace+1))}"
+  fi
+  result=($(compgen -W "$completionString" "$word"))
+  [[ $word == '' ]] && echo "${result[@]}" && return 0
+  if [[ ${#result[@]} -eq 1 ]]; then
+    if [[ $lastSpace -eq 0  ]]; then
+      READLINE_LINE="${result[0]}"
+    else
+      READLINE_LINE="${READLINE_LINE:0:$(($lastSpace+1))}${result[0]}"
+    fi
+    READLINE_POINT=${#READLINE_LINE}
+  else
+    local lastMatchedChar=${#result[1]}
+    for i in `seq 0 $((${#result[@]}-1))`; do
+      for n in `seq 0 $((${#result[@]}-1))`; do
+        for x in `seq 0 $((${#result[$i]}-1))`; do
+          if [[ ${result[$i]:$x:1} != ${result[$n]:$x:1} ]] && [[ "${result[$n]}" != "${result[$i]}" ]]; then
+            [[ $lastMatchedChar -gt $x ]] && lastMatchedChar=$x
+            break
+          fi
+        done
+      done
+    done
+    if [[ $lastMatchedChar -gt 0 ]]; then
+      READLINE_LINE="${READLINE_LINE:0:$(($lastSpace+1))}${result[0]:0:$lastMatchedChar}"
+    else
+      READLINE_LINE="${READLINE_LINE}"
+    fi
+    READLINE_POINT=${#READLINE_LINE}
+    echo "${result[@]}"
+  fi
+}
+
+set -o emacs
+bind -x '"\t":"tabComplete"'
+location="~"
+
+echo -e '\n\t===== HVA VLO CLI 1.0 ====='
+execute ls >/dev/null
+completionString="$defaultCompletrionString"
+while read -e -p "$location/:" cmd; do
+  execute $cmd
+  completionString='exit ls searchcourse'
+done
+
+# code to load a list of the global files of a course.
+#heey='false'
+#curl -s -X GET --cookie $cookie $url/main/document/document.php?cidReq=DATASTRUCTURES |\
+#  while read line; do 
+#    if [[ $line =~ '>Type</a>' ]]; then 
+#      heey='true'
+#    elif $heey; then 
+#      [[ $line =~ '</table>' ]] && heey='false'
+#      echo $line 
+#    fi
+#  done | grep -o --perl-regexp '(?<=title=")[^"]*' | sort -u --ignore-case | sed '/^.*\(cidReq\|Download\).*$/d'
 
